@@ -1,0 +1,151 @@
+from System.Collections.Generic import List
+from AlgorithmImports import *
+import decimal
+
+# Main Algorithm Class
+class DropboxCSVDataAlgorithm(QCAlgorithm):
+    def Initialize(self):
+        self.SetStartDate(2019, 1, 1)  # Set Start Date
+        self.SetEndDate(2022, 12, 31)   # Set End Date
+
+        self.SetCash(100000)           # Set Strategy Cash
+
+        # Add the custom data to the algorithm
+        #self.AddData(DropboxCSVData, "DropboxCSVData", Resolution.Daily)
+
+        self.symbols = ["AXP", "GOOGL", "MRK", "MDT"]
+        for symbol in self.symbols:
+            self.AddEquity(symbol, Resolution.Daily)
+            self.AddData(DropboxCSVData, symbol, Resolution.Daily)
+
+        #self.symbols = [self.AddEquity(ticker, Resolution.Daily).Symbol
+                        #for ticker in ["BA", "BURL", "VTI", "SPY"]] #UPDATE STOCKS 
+        
+        self.initialInvestmentAmount = 20000
+        self.initialized = False
+
+        self.prevPredictedPrices = {symbol: None for symbol in self.symbols}
+        self.windows = {symbol: RollingWindow[TradeBar](5) for symbol in self.symbols}
+
+
+    def OnData(self, data):
+        if not self.initialized:
+            for symbol in self.symbols:
+                if data.ContainsKey(symbol) and data[symbol] is not None:
+                    price = data[symbol].Price
+                    if price > 0:
+                        quantity = self.initialInvestmentAmount / price
+                        self.MarketOrder(symbol, int(quantity))
+            self.initialized = True
+
+        for symbol in self.symbols:
+            equity_data = data.get(symbol)
+            dropbox_data = data.get(f"{symbol}.DropboxCSVData")
+            self.Debug(equity_data)
+            self.Debug(dropbox_data)
+
+            #for key in data.Keys:
+            #    self.Debug(key)
+
+            if equity_data is not None and dropbox_data is not None:
+            # Process Dropbox CSV data for the symbol
+                todays_predicted_price = dropbox_data['Predicted_Price']
+                self.windows[symbol].Add(equity_data)
+
+                if self.windows[symbol].IsReady:
+                    mvwap, upper_band, lower_band = self.CalculateMVWAP(symbol, self.windows[symbol])
+                    prevPredictedPrice = self.prevPredictedPrices[symbol]
+                # Execute trading logic based on MVWAP and predicted prices
+                    if prevPredictedPrice is not None:
+                        self.ExecuteMeanReversionLogic(symbol, equity_data.Close, mvwap, upper_band, lower_band, todays_predicted_price, prevPredictedPrice)
+            
+            # Store today's predicted price for use in the next time step
+                self.prevPredictedPrices[symbol] = todays_predicted_price
+
+    def CalculateMVWAP(self, symbol, window):
+        total_market_value = 0
+        total_value_weighted_price = 0
+
+        for bar in window:
+            market_value = bar.Volume * bar.Close
+            value_weighted_price = market_value * bar.Close
+
+            total_market_value += market_value
+            total_value_weighted_price += value_weighted_price
+
+        if total_market_value > 0:
+            mvwap = total_value_weighted_price / total_market_value
+        else:
+            self.Debug(f"No market value data available for {symbol}.")
+        mvwap_values = [bar.Close for bar in window]
+        std_dev = np.std(mvwap_values)
+
+        upper_band = mvwap + (std_dev * 2)
+        lower_band = mvwap - (std_dev * 2)
+        return mvwap, upper_band, lower_band
+
+    def ExecuteMeanReversionLogic(self, symbol, current_price, mvwap, upper_band, lower_band, todays_predicted_price, yesterdays_predicted_price):
+        total_portfolio_value = self.Portfolio.TotalPortfolioValue
+        current_holding = self.Portfolio[symbol]
+        current_position_fraction = current_holding.HoldingsValue / total_portfolio_value if total_portfolio_value else 0
+
+        if current_price < lower_band:
+            self.Debug("outside below")
+            self.Debug(f"{symbol} {todays_predicted_price} {yesterdays_predicted_price}")
+            if todays_predicted_price > (yesterdays_predicted_price):
+                self.Debug("inside")
+                self.SetHoldings(symbol, current_position_fraction + 0.05)
+                
+
+        elif current_price > upper_band:
+            self.Debug("outside above")
+            self.Debug(f"{symbol} {todays_predicted_price} {yesterdays_predicted_price}")
+            if todays_predicted_price < (yesterdays_predicted_price):
+                self.Debug("inside")
+                self.SetHoldings(symbol, current_position_fraction - 0.05)
+
+        elif lower_band <= current_price <= upper_band:
+            # Adjust to 20% of total equity
+            self.Debug("reset")
+            target_fraction = 0.25
+            self.SetHoldings(symbol, target_fraction)
+            
+    def OnEndOfAlgorithm(self) -> None:
+        for symbol in self.symbols:
+            quantity = self.Portfolio[symbol].Quantity * self.Securities[symbol].Price
+            self.Debug(f"{symbol} {quantity}")
+        cash_balance = self.Portfolio.Cash
+        self.Debug(f"Current cash balance: ${cash_balance}")
+
+
+# Custom Data Class for Dropbox CSV Data
+class DropboxCSVData(PythonData):
+    SymbolURLs = {
+        "BA": "https://www.dropbox.com/scl/fi/6sk55irzwx3hnncxs18sz/test_results_BA.csv?rlkey=4nzj277ez6ulkuqkbqr5uk4v9&dl=1", 
+        "BURL": "https://www.dropbox.com/scl/fi/78e7s10c0fklq13a4600e/test_results_BURL.csv?rlkey=x2mihhpks1jcjzt5y3gdcv934&dl=1",
+        "VTI": "https://www.dropbox.com/scl/fi/1f7ac2rnl1a3yhjl7g34l/test_results_VTI.csv?rlkey=vuji9ufafchbjgw2fmlhb0jw9&dl=1", 
+        "SPY": "https://www.dropbox.com/scl/fi/fxdywdzrkxjiire1nrptp/test_results_SPY.csv?rlkey=6xqs3oixrxbl0vhxu8jx93ujq&dl=1",
+        "MRK": "https://www.dropbox.com/scl/fi/ksuw7vwwatzlvt74sdk42/test_results_MRK.csv?rlkey=vtatr1egr35c1w9vh9ih4dxqc&dl=1",
+        "MDT": "https://www.dropbox.com/scl/fi/g1df7xr4y481yp9k1ujqj/test_results_MDT.csv?rlkey=9ienxbm2a5752zh6damc109g6&dl=1",
+        "GOOGL":"https://www.dropbox.com/scl/fi/3jhkk8qmx5rydoj4bx4rj/test_results_GOOGL.csv?rlkey=i6duwy2l26unkqgpn4nxp3v28&dl=1",
+        "AXP":"https://www.dropbox.com/scl/fi/954pcjpqwameloyh7f0p8/test_results_AXP.csv?rlkey=7bg5s5ac9aruvlh918zfoep7z&dl=1",
+        "VZ": "https://www.dropbox.com/scl/fi/rc3e5s6h8ue1yl2pkwcdk/test_results_VZ.csv?rlkey=gh0nwrgtjr22avjt8l703k3p3&dl=1"
+    }
+
+    def GetSource(self, config, date, isLiveMode):
+        url = self.SymbolURLs.get(config.Symbol.Value, None)
+        return SubscriptionDataSource(url, SubscriptionTransportMedium.RemoteFile)
+
+    def Reader(self, config, line, date, isLiveMode):
+        if not (line.strip() and line[0].isdigit()): 
+            return None
+
+        data = DropboxCSVData()
+        data.Symbol = config.Symbol
+
+        dateString, actual, predicted = line.split(',')
+        data.Time = datetime.strptime(dateString, '%m/%d/%y')
+        data.Value = decimal.Decimal(actual)
+        data['Predicted_Price'] = decimal.Decimal(predicted)
+
+        return data
